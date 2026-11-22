@@ -78,7 +78,8 @@ Each case also lists "why this alert might be wrong" and recommended checks. **R
 
 ## Canary and Databricks
 
-`src/wellguard.py` writes `outputs/canary_risk_tags.csv` with columns `timestamp, tag, value, quality`. Each well gets one tag, `WellGuard.<uwi>.FailureRisk7d`, so the risk score can be loaded into a Canary historian next to the sensor tags and trended or alarmed there. The same script runs unchanged in a Databricks notebook with the parquet files in DBFS.
+`src/wellguard.py` writes `outputs/canary_risk_tags.csv` with columns `timestamp, tag, value, quality`. Each well gets one tag, `WellGuard.<uwi>.FailureRisk7d`, so the risk score can be loaded into a Canary historian next to the sensor tags and trended or alarmed there. 
+**Databricks:** `--source databricks` reads the three tables (`workspace.default.daily_production`, `production_failures`, `well_jobs`) from a Databricks SQL warehouse. It uses the SQL Statement Execution API with Arrow results, and the field and date filters run in the warehouse. Tested on 2026-11-22 against a Free Edition serverless warehouse: the full run took about 45 s. Every output file was byte-identical to the local parquet run.
 
 ## Run it
 
@@ -86,6 +87,11 @@ Each case also lists "why this alert might be wrong" and recommended checks. **R
 python3 -m venv .venv && .venv/bin/pip install pandas pyarrow scikit-learn
 # put daily_production.parquet, well_jobs.parquet and production_failures.parquet in data/
 .venv/bin/python src/wellguard.py          # about 20 s; writes outputs/ and dashboard/data.js
+# or read the tables from Databricks instead of data/ (credentials stay outside the repo):
+#   ~/.databrickscfg  [DEFAULT]  host = https://<workspace>.cloud.databricks.com
+#                                token = <personal access token, scope: sql>
+#                                warehouse_id = <id from the warehouse's HTTP path>
+.venv/bin/python src/wellguard.py --source databricks
 .venv/bin/python -m unittest discover tests
 open dashboard/index.html
 ```
