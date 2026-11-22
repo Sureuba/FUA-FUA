@@ -1,20 +1,31 @@
 """WellGuard: pre-failure production loss and 7-day failure-risk backtest.
 
-Run: .venv/bin/python src/wellguard.py   (reads data/*.parquet, writes outputs/)
+Run: .venv/bin/python src/wellguard.py                      (reads data/*.parquet, writes outputs/)
+     .venv/bin/python src/wellguard.py --source databricks  (reads the tables from a Databricks SQL warehouse)
 """
 from __future__ import annotations
 
+import argparse
+import configparser
+import io
 import json
+import os
+import time
+import urllib.request
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 OUT = ROOT / "outputs"
+
+SOURCE = "parquet"        # or "databricks"; set by --source
+TABLE_PREFIX = os.environ.get("WELLGUARD_TABLE_PREFIX", "workspace.default")
 
 M3_TO_BBL = 6.2898
 HORIZON_DAYS = 7          # predict a failure in (d, d + 7]
@@ -50,26 +61,103 @@ def normalize_failure_type(raw: object) -> str:
     return "Other"
 
 
-def load_failures(path: Path = DATA / "production_failures.parquet") -> pd.DataFrame:
-    f = pd.read_parquet(path)
-    f["failure_date"] = pd.to_datetime(f["failure_start_date"]).astype("datetime64[ns]")
+def _dates(s: pd.Series) -> pd.Series:
+    """Naive datetime64[ns]; Databricks may return dates as tz-aware timestamps."""
+    s = pd.to_datetime(s)
+    return (s.dt.tz_localize(None) if s.dt.tz is not None else s).astype("datetime64[ns]")
+
+
+def _sql_str(v: str) -> str:
+    return "'" + str(v).replace("'", "''") + "'"
+
+
+def daily_sql(fields: list[str]) -> str:
+    """Warehouse query for load_daily: the field and date filters run in Databricks, not locally."""
+    since = (STUDY_START - pd.Timedelta(days=45)).date()
+    return (f"SELECT {', '.join(DAILY_COLS)} FROM {TABLE_PREFIX}.daily_production "
+            f"WHERE field_operating_area IN ({', '.join(map(_sql_str, fields))}) "
+            f"AND production_date >= DATE'{since}'")
+
+
+def _databricks_config() -> tuple[str, str, str]:
+    """Host, token and warehouse id from DATABRICKS_* env vars, else the profile in ~/.databrickscfg."""
+    cfg = configparser.ConfigParser()
+    cfg.read(Path.home() / ".databrickscfg")
+    prof = cfg[os.environ.get("DATABRICKS_CONFIG_PROFILE", "DEFAULT")]
+    host = os.environ.get("DATABRICKS_HOST") or prof.get("host", "")
+    token = os.environ.get("DATABRICKS_TOKEN") or prof.get("token", "")
+    warehouse = os.environ.get("DATABRICKS_WAREHOUSE_ID") or prof.get("warehouse_id", "")
+    if not (host and token and warehouse):
+        raise SystemExit("Databricks: set host, token and warehouse_id in ~/.databrickscfg (see README)")
+    return host.rstrip("/"), token, warehouse
+
+
+def query_databricks(sql: str) -> pd.DataFrame:
+    """Run `sql` on a SQL warehouse via the Statement Execution API and return the Arrow result."""
+    host, token, warehouse = _databricks_config()
+
+    def api(method: str, path: str, body: dict | None = None) -> dict:
+        req = urllib.request.Request(host + path, method=method,
+                                     data=None if body is None else json.dumps(body).encode(),
+                                     headers={"Authorization": f"Bearer {token}",
+                                              "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.load(r)
+
+    r = api("POST", "/api/2.0/sql/statements",
+            {"warehouse_id": warehouse, "statement": sql, "wait_timeout": "50s",
+             "on_wait_timeout": "CONTINUE", "disposition": "EXTERNAL_LINKS", "format": "ARROW_STREAM"})
+    while r["status"]["state"] in ("PENDING", "RUNNING"):
+        time.sleep(2)
+        r = api("GET", f"/api/2.0/sql/statements/{r['statement_id']}")
+    if r["status"]["state"] != "SUCCEEDED":
+        raise RuntimeError(f"Databricks query failed: {r['status']}")
+    tables, chunk = [], r.get("result")
+    while chunk:
+        links = chunk.get("external_links", [])
+        for link in links:
+            # presigned cloud-storage URL: must be fetched without the Databricks token
+            with urllib.request.urlopen(link["external_link"], timeout=300) as f:
+                tables.append(pa.ipc.open_stream(io.BytesIO(f.read())).read_all())
+        nxt = links[-1].get("next_chunk_internal_link") if links else None
+        chunk = api("GET", nxt) if nxt else None
+    if not tables:
+        return pd.DataFrame(columns=[c["name"] for c in r["manifest"]["schema"]["columns"]])
+    return pa.concat_tables(tables).to_pandas()
+
+
+def read_table(name: str, columns: list[str] | None = None) -> pd.DataFrame:
+    if SOURCE == "databricks":
+        return query_databricks(f"SELECT {', '.join(columns) if columns else '*'} FROM {TABLE_PREFIX}.{name}")
+    return pd.read_parquet(DATA / f"{name}.parquet", columns=columns)
+
+
+def load_failures() -> pd.DataFrame:
+    f = read_table("production_failures")
+    f["failure_date"] = _dates(f["failure_start_date"])
     f["component"] = f["failure_type"].map(normalize_failure_type)
     f = f.drop_duplicates(["uwi", "failure_date", "component"])
     return f.sort_values(["uwi", "failure_date"]).reset_index(drop=True)
 
 
-def load_jobs(path: Path = DATA / "well_jobs.parquet") -> pd.DataFrame:
-    j = pd.read_parquet(path, columns=["uwi", "job_category", "start_date", "end_date",
-                                       "job_duration_days", "field_est_total"])
-    j["start_date"] = pd.to_datetime(j["start_date"]).astype("datetime64[ns]")
+def load_jobs() -> pd.DataFrame:
+    j = read_table("well_jobs", ["uwi", "job_category", "start_date", "end_date",
+                                 "job_duration_days", "field_est_total"])
+    j["start_date"] = _dates(j["start_date"])
+    for col in ("job_duration_days", "field_est_total"):  # may arrive as decimal from Databricks
+        j[col] = pd.to_numeric(j[col], errors="coerce").astype(float)
     return j
 
 
-def load_daily(fields: list[str], path: Path = DATA / "daily_production.parquet") -> pd.DataFrame:
+def load_daily(fields: list[str]) -> pd.DataFrame:
     """Producing-well days in the failure-reporting fields, from 45 days before STUDY_START."""
-    d = pd.read_parquet(path, columns=DAILY_COLS,
-                        filters=[("field_operating_area", "in", fields)])
-    d["production_date"] = pd.to_datetime(d["production_date"]).astype("datetime64[ns]")
+    if SOURCE == "databricks":
+        d = query_databricks(daily_sql(fields))
+    else:
+        d = pd.read_parquet(DATA / "daily_production.parquet", columns=DAILY_COLS,
+                            filters=[("field_operating_area", "in", fields)])
+    d["production_date"] = _dates(d["production_date"])
+    d["on_production_date"] = _dates(d["on_production_date"])
     for col in DAILY_COLS[8:]:
         if col != "pcp_pump_make":  # some numeric columns are stored as decimal
             d[col] = pd.to_numeric(d[col], errors="coerce").astype(float)
@@ -431,6 +519,9 @@ def run() -> dict:
 
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--source", choices=["parquet", "databricks"], default="parquet")
+    SOURCE = ap.parse_args().source
     s = run()
-    print(json.dumps({k: v for k, v in s.items() if k not in ("daily_alerts", "risk_top", "monthly_failures")},
+    print(json.dumps({k: v for k, v in s.items() if k not in ("daily_alerts", "risk_top", "monthly_failures", "replay")},
                      indent=2, default=float))

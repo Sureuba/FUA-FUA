@@ -103,6 +103,14 @@ class AlertEpisodes(unittest.TestCase):
         self.assertEqual(ep["outcome"].tolist(), ["Confirmed", "No recorded failure within 7 d"])
 
 
+class DailySql(unittest.TestCase):
+    def test_pushes_field_and_date_filter_and_escapes_quotes(self):
+        sql = wg.daily_sql(["Cactus Lake", "O'Brien"])
+        self.assertIn("FROM workspace.default.daily_production", sql)
+        self.assertIn("field_operating_area IN ('Cactus Lake', 'O''Brien')", sql)
+        self.assertIn("production_date >= DATE'2025-03-17'", sql)  # STUDY_START minus 45 days
+
+
 class PickReplayCases(unittest.TestCase):
     def test_longest_warning_per_component_running_only(self):
         c = pd.DataFrame({"uwi": ["A", "B", "C", "D"],
