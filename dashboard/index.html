@@ -52,6 +52,13 @@
                        background: var(--bg); color: var(--ink); font: inherit; }
   ul { margin: 0; padding-left: 18px; } li { margin-bottom: 4px; }
   .bar { height: 10px; background: var(--s1); border-radius: 3px; }
+  h3 { font-size: 14px; margin: 0 0 8px; }
+  .cases { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { font: inherit; font-size: 14px; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+           border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  button[aria-selected="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  #reveal { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .outcome { border-left: 4px solid var(--bad); padding: 8px 12px; background: var(--bg); border-radius: 6px; font-size: 14px; }
 </style>
 </head>
 <body>
@@ -91,6 +98,33 @@
     <div class="card"><h2>Strongest signals</h2>
       <p class="muted">Drop in PR-AUC when each input is shuffled. These are associations, not causes.</p>
       <div class="scroll"><table id="imp"></table></div></div>
+  </section>
+
+  <section class="card" style="margin-bottom:16px">
+    <h2>Historical replay: would WellGuard have flagged it? <span class="pill">backtest</span></h2>
+    <p class="muted">Pick a test-period case. You see the well as it looked on the day of the first alert. Then reveal what happened.</p>
+    <div class="cases" id="cases" role="tablist" aria-label="Replay cases"></div>
+    <div class="grid two" style="margin:12px 0 0">
+      <div>
+        <table id="rpSummary"></table>
+        <p style="margin-top:10px"><button id="reveal" type="button">Reveal outcome</button></p>
+        <div id="rpOutcome" class="outcome" hidden></div>
+      </div>
+      <div class="chart"><canvas id="cReplay" aria-label="Replay well oil rate, baseline and risk score"></canvas></div>
+    </div>
+    <div class="grid two" style="margin-top:12px">
+      <div><h3>Observed on the alert day</h3><div class="scroll"><table id="rpEvidence"></table></div></div>
+      <div>
+        <h3>Why this alert might be wrong</h3><ul id="rpWrong"></ul>
+        <h3 style="margin-top:12px">Recommended checks</h3><ul id="rpChecks"></ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" style="margin-bottom:16px">
+    <h2>Engineer workload: alert reviews and outcomes</h2>
+    <p class="muted" id="wlNote"></p>
+    <div class="scroll"><table id="outcomes"></table></div>
   </section>
 
   <section class="card" style="margin-bottom:16px">
@@ -170,7 +204,98 @@ $("limits").innerHTML = [
   `Warning time is short: median ${fmt(M.median_warning_days)} days. Much of the signal is a well already slowing or going down before the failure is logged. Treat it as early detection plus prioritisation, not a week-ahead forecast.`,
   `Shortfall counts oil below baseline in the 14 days up to the failure. The logged lost_oil_m3 for the same windows is ${fmt(S.lost_oil_logged_m3)} m³. Repair cost is the field estimate of the first job within -3 to +21 days of the failure.`,
   `Read-only: no setpoint or control data exists, so WellGuard ranks wells for engineers to check and changes nothing in the field. Signals are associations, not root causes.`,
+  `Replay cases are the caught test-period failures with the longest warning on wells still running at the first alert, two per component. They show the model at its best, so read them next to the workload table, which counts every alert.`,
 ].map(t => `<li>${t}</li>`).join("");
+
+// --- alert review workload: repeat alerts on a well within 7 days count as one review ---------
+const O = S.alert_outcomes, nEp = S.alert_episodes;
+$("wlNote").textContent = `The model raises ${fmt(M.alerts_per_day)} alerts/day, but most repeat on the same well. ` +
+  `Counting repeats within 7 days once gives ${fmt(nEp)} reviews in the test period, about ${fmt(S.alert_episodes_per_day, 1)} new wells to check per day.`;
+const oRows = [
+  ["Confirmed", "A logged failure followed an alert in the review within 7 days", O["Confirmed"], nEp],
+  ["No recorded failure within 7 d", "Not automatically wrong: the well may have been fixed, or the risk was real but did not happen", O["No recorded failure within 7 d"], nEp],
+  ["Missed failure", "A logged failure with no alert in the 7 days before it", O["Missed failure (no alert in prior 7 d)"], M.failures_in_test],
+];
+$("outcomes").innerHTML = `<thead><tr><th>Outcome</th><th>Meaning</th><th class="n">Count</th><th class="n">Share</th></tr></thead><tbody>` +
+  oRows.map(([k, m, v, of]) => `<tr><td>${k}</td><td class="muted">${m}</td><td class="n">${fmt(v)}</td><td class="n">${pct(v / of)}<span class="muted" style="font-size:12px"> of ${of === nEp ? "reviews" : "failures"}</span></td></tr>`).join("") +
+  `</tbody>`;
+
+// --- historical replay ----------------------------------------------------------------------
+const ratioTxt = r => r == null ? "no reading" : pct(r) + " of normal";
+let replayChart = null;
+function showCase(i) {
+  const c = S.replay[i], e = c.evidence;
+  [...$("cases").children].forEach((b, j) => b.setAttribute("aria-selected", String(j === i)));
+  $("rpSummary").innerHTML = "<tbody>" + [
+    ["Well", `${c.well_name}<br><span class="muted" style="font-size:12px">${c.uwi} · ${c.field}</span>`],
+    ["As of", c.first_alert + " (first alert)"],
+    ["Predicted event", "Logged rod, pump or tubing failure in the next 7 days"],
+    ["Risk score", `${c.score_at_alert.toFixed(2)} <span class="muted">(alert threshold ${S.threshold.toFixed(2)})</span>`],
+    ["Model", "Gradient boosting, trained before " + S.test_start + " (out-of-sample)"],
+  ].map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("") + "</tbody>";
+  $("rpOutcome").hidden = true;
+  $("reveal").hidden = false;
+  $("rpOutcome").innerHTML = `<strong>${c.component} failure logged on ${c.failure_date}</strong>, ${c.lead_days} days after the first alert. ` +
+    `Cause: ${c.cause}. Repair: ${c.repair_job ?? "no matched job"}${c.repair_cost_cad == null ? "" : ", field estimate C$" + fmt(c.repair_cost_cad)}. ` +
+    `Oil below baseline in the 14 days up to the failure: ${fmt(c.shortfall_m3 * BBL)} bbl.`;
+
+  $("rpEvidence").innerHTML = `<thead><tr><th>Signal</th><th>Value</th><th>Source</th></tr></thead><tbody>` + [
+    ["Oil, 3-day avg vs own baseline", ratioTxt(e.oil_ratio_3d), "oil_produced_m3"],
+    ["Run hours, 3-day avg", e.hours_on_3d == null ? "–" : fmt(e.hours_on_3d, 1) + " h/d", "hours_on_prod"],
+    ["Hours down that day", e.hours_down == null ? "–" : fmt(e.hours_down, 0) + " h", "hours_down"],
+    ["Rod torque vs baseline", ratioTxt(e.torque_ratio), "pcp_pump_rod_torque_ftlb"],
+    ["Motor current vs baseline", ratioTxt(e.current_ratio), "pcp_pump_electric_current_a"],
+    ["Pump efficiency vs baseline", ratioTxt(e.eff_ratio), "pump_efficiency_pct"],
+    ["Pump RPM vs baseline", ratioTxt(e.rpm_ratio), "pcp_pump_rpm"],
+    ["Failures on this well, prior 365 d", e.failures_prior_365d == null ? "–" : fmt(e.failures_prior_365d), "production_failures"],
+    ["Days since last failure", e.days_since_failure == null ? "none logged" : fmt(e.days_since_failure), "production_failures"],
+  ].map(r => `<tr><td>${r[0]}</td><td>${r[1]}</td><td class="muted" style="font-size:12px"><code>${r[2]}</code></td></tr>`).join("") + "</tbody>";
+
+  const wrong = [];
+  if (e.hours_down >= 24) wrong.push("The well was down all day on the alert date. Operators may already know, and the score partly reflects that downtime.");
+  if (c.torque_coverage < 0.5 || e.torque_ratio == null) wrong.push("Torque or current readings are missing, so the score leans on production and failure history.");
+  if (e.days_since_failure != null && e.days_since_failure < 30) wrong.push(`The last failure was ${fmt(e.days_since_failure)} days ago. A restart after repair can look like a decline.`);
+  if (e.failures_prior_365d >= 3) wrong.push(`${fmt(e.failures_prior_365d)} failures in the past year. History alone raises the score.`);
+  if (e.rpm_ratio != null && Math.abs(e.rpm_ratio - 1) > 0.1) wrong.push("Pump RPM changed against baseline. An operating change may explain the lower rate.");
+  wrong.push(`At this alert budget ${pct(M.alert_precision)} of alerts are followed by a logged failure within 7 days. The signals are associations, not causes.`);
+  $("rpWrong").innerHTML = wrong.map(t => `<li>${t}</li>`).join("");
+
+  const checks = [];
+  if (e.hours_down > 0) checks.push("Check the downtime reason in the field log before treating this as a developing failure.");
+  if (e.oil_ratio_3d != null && e.oil_ratio_3d < 0.8)
+    checks.push(e.torque_ratio != null && Math.abs(e.torque_ratio - 1) < 0.1
+      ? "Rate is down while torque is flat: check pump intake, fluid level and inflow, then rod string integrity."
+      : "Rate is down against baseline: confirm the well test, then check pump intake, fluid level and rod string integrity.");
+  if (e.torque_ratio != null && e.torque_ratio > 1.1) checks.push("Torque is above baseline: compare torque against RPM to separate loading from a speed change.");
+  checks.push("Review previous rod, pump and tubing jobs on this well and compare conditions before and after each one.");
+  checks.push("Any physical inspection or operating change follows the operator's approved procedures. WellGuard changes nothing in the field.");
+  $("rpChecks").innerHTML = checks.map(t => `<li>${t}</li>`).join("");
+  drawReplay(c, false);
+}
+function drawReplay(c, revealed) {
+  if (!window.Chart) return;
+  const rows = revealed ? c.series : c.series.filter(r => r.production_date <= c.first_alert);
+  const labels = rows.map(r => r.production_date);
+  const ds = [
+    { label: "Oil (m³/d)", data: rows.map(r => r.oil_produced_m3), borderColor: css("--s1"), backgroundColor: css("--s1"), pointRadius: 1.5, yAxisID: "y" },
+    { label: "Own baseline", data: rows.map(r => r.oil_base), borderColor: css("--s4"), borderDash: [5, 4], pointRadius: 0, yAxisID: "y" },
+    { label: "Risk score", data: rows.map(r => r.score), borderColor: css("--s2"), backgroundColor: css("--s2"), pointRadius: 0, yAxisID: "y2" },
+    { label: "Alert threshold", data: rows.map(() => S.threshold), borderColor: css("--s2"), borderDash: [2, 3], borderWidth: 1, pointRadius: 0, yAxisID: "y2" },
+  ];
+  if (revealed) ds.push({ type: "bar", label: "Logged failure", data: rows.map(r => r.production_date === c.failure_date ? 1 : null),
+                          backgroundColor: css("--bad"), barPercentage: 0.6, yAxisID: "y2" });
+  if (replayChart) replayChart.destroy();
+  replayChart = new Chart($("cReplay"), {
+    type: "line", data: { labels, datasets: ds },
+    options: { maintainAspectRatio: false, interaction: { mode: "index", intersect: false },
+      scales: { x: { ticks: { maxTicksLimit: 6 } }, y: { beginAtZero: true, title: { display: true, text: "m³/d" } },
+                y2: { min: 0, max: 1, position: "right", grid: { display: false }, title: { display: true, text: "risk" } } } },
+  });
+}
+let current = 0;
+$("cases").innerHTML = S.replay.map((c, i) => `<button type="button" role="tab" data-i="${i}">${c.field} · case ${i + 1}</button>`).join("");
+$("cases").addEventListener("click", ev => { const b = ev.target.closest("button"); if (b) showCase(current = Number(b.dataset.i)); });
+$("reveal").addEventListener("click", () => { $("rpOutcome").hidden = false; $("reveal").hidden = true; drawReplay(S.replay[current], true); });
 
 if (window.Chart) {
   Chart.defaults.color = css("--muted");
@@ -201,6 +326,7 @@ if (window.Chart) {
     options: { maintainAspectRatio: false, scales: { x: { stacked: true, ticks: { maxTicksLimit: 8 } }, y: { stacked: true, beginAtZero: true } } },
   });
 }
+if (S.replay.length) showCase(0);
 </script>
 </body>
 </html>

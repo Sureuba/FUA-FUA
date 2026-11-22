@@ -90,5 +90,28 @@ class EventMetrics(unittest.TestCase):
         self.assertEqual(m["alert_precision"], 0.5)
 
 
+class AlertEpisodes(unittest.TestCase):
+    def test_suppression_and_outcome(self):
+        dates = pd.date_range("2025-06-01", periods=30).astype("datetime64[ns]")
+        t = pd.DataFrame({"uwi": "A", "production_date": dates, "flag": False, "dtn": np.nan})
+        t.loc[[0, 3, 6], "flag"] = True    # gaps of 3 days: one episode
+        t.loc[[20, 21], "flag"] = True     # 14 days later: a second episode
+        t.loc[[5, 6], "dtn"] = [2, 1]      # failure on 2025-06-08, inside the first episode's horizon
+        ep = wg.alert_episodes(t)
+        self.assertEqual(len(ep), 2)
+        self.assertEqual(ep["n_alerts"].tolist(), [3, 2])
+        self.assertEqual(ep["outcome"].tolist(), ["Confirmed", "No recorded failure within 7 d"])
+
+
+class PickReplayCases(unittest.TestCase):
+    def test_longest_warning_per_component_running_only(self):
+        c = pd.DataFrame({"uwi": ["A", "B", "C", "D"],
+                          "component": ["Rods", "Rods", "Pump", "Pump"],
+                          "lead_days": [6, 4, 7, 5],
+                          "hours_on_3d": [20.0, 24.0, 0.0, 12.0]})
+        out = wg.pick_replay_cases(c, per_component=1)
+        self.assertEqual(sorted(out["uwi"].tolist()), ["A", "D"])  # C is already down, so it is skipped
+
+
 if __name__ == "__main__":
     unittest.main()

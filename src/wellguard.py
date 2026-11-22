@@ -223,6 +223,60 @@ def event_metrics(test: pd.DataFrame, flag: pd.Series, failures: pd.DataFrame) -
     }
 
 
+def alert_episodes(t: pd.DataFrame, review_days: int = HORIZON_DAYS) -> pd.DataFrame:
+    """Group flagged well-days into review episodes: a new episode starts after `review_days` with no alert.
+    An engineer reviews an episode once, so repeated alerts on the same well are not re-counted.
+    Outcome is Confirmed when a failure follows any alert in the episode within the horizon.
+    """
+    a = t[t["flag"]].sort_values(["uwi", "production_date"]).copy()
+    gap = a.groupby("uwi")["production_date"].diff().dt.days
+    a["episode"] = (gap.isna() | (gap > review_days)).cumsum()
+    a["hit"] = a["dtn"].between(1, HORIZON_DAYS)
+    ep = a.groupby("episode").agg(uwi=("uwi", "first"), start=("production_date", "min"),
+                                  end=("production_date", "max"), n_alerts=("flag", "size"),
+                                  hit=("hit", "max")).reset_index(drop=True)
+    ep["outcome"] = np.where(ep["hit"], "Confirmed", f"No recorded failure within {HORIZON_DAYS} d")
+    return ep.drop(columns="hit")
+
+
+def pick_replay_cases(cases: pd.DataFrame, per_component: int = 2) -> pd.DataFrame:
+    """Caught failures with the longest warning per component, on wells still running at the first alert."""
+    c = cases[cases["hours_on_3d"] > 0]
+    return (c.sort_values("lead_days", ascending=False, kind="stable")
+             .groupby("component", sort=False).head(per_component))
+
+
+REPLAY_SIGNALS = ["oil_ratio_3d", "hours_on_3d", "hours_down", "torque_ratio", "current_ratio", "eff_ratio",
+                  "rpm_ratio", "water_cut_delta_7d", "failures_prior_365d", "days_since_failure"]
+
+
+def replay_payload(feats: pd.DataFrame, clf, picked: pd.DataFrame) -> list[dict]:
+    """Daily series and the evidence at the first alert for each replay case, for the dashboard."""
+    out = []
+    for c in picked.itertuples():
+        w = feats[(feats["uwi"] == c.uwi)
+                  & feats["production_date"].between(c.first_alert - pd.Timedelta(days=21),
+                                                     c.failure_date + pd.Timedelta(days=3))].copy()
+        w["score"] = clf.predict_proba(w[FEATURES])[:, 1]
+        at = w[w["production_date"] == c.first_alert].iloc[0]
+        series = w[["production_date", "oil_produced_m3", "oil_base", "hours_on_prod", "score",
+                    "pcp_pump_rod_torque_ftlb", "pump_efficiency_pct"]].copy()
+        series["production_date"] = series["production_date"].dt.strftime("%Y-%m-%d")
+        out.append({
+            "uwi": c.uwi, "well_name": at["well_name"], "field": at["field_operating_area"],
+            "component": c.component, "cause": c.cause, "failure_date": str(c.failure_date.date()),
+            "first_alert": str(c.first_alert.date()), "lead_days": int(c.lead_days),
+            "repair_job": None if pd.isna(c.job_category) else c.job_category,
+            "repair_cost_cad": None if pd.isna(c.field_est_total) else float(c.field_est_total),
+            "shortfall_m3": float(c.shortfall_m3),
+            "score_at_alert": float(w.loc[at.name, "score"]),
+            "evidence": {k: (None if pd.isna(at[k]) else float(at[k])) for k in REPLAY_SIGNALS},
+            "torque_coverage": float(w["pcp_pump_rod_torque_ftlb"].notna().mean()),
+            "series": json.loads(series.to_json(orient="records")),
+        })
+    return out
+
+
 def run() -> dict:
     OUT.mkdir(exist_ok=True)
     failures = load_failures()
@@ -281,6 +335,21 @@ def run() -> dict:
     after_alert = 0.0
     for (uwi, fdate), a in first_alert.items():
         after_alert += float(gap.loc[uwi].loc[a:fdate].sum())
+
+    # alert review episodes (repeat alerts on a well within a week count once) and their outcomes
+    episodes = alert_episodes(t)
+    outcomes = episodes["outcome"].value_counts().to_dict()
+    outcomes["Missed failure (no alert in prior 7 d)"] = model_m["failures_in_test"] - model_m["failures_caught"]
+
+    # historical replay: caught failures with the longest warning, on wells still running when flagged
+    cases = first_alert.reset_index()
+    cases["lead_days"] = (cases["failure_date"] - cases["first_alert"]).dt.days
+    cases = cases.merge(t[["uwi", "production_date", "hours_on_3d"]],
+                        left_on=["uwi", "first_alert"], right_on=["uwi", "production_date"]).drop(columns="production_date")
+    cases = cases.merge(fs.drop_duplicates(["uwi", "failure_date"])[
+        ["uwi", "failure_date", "component", "cause", "shortfall_m3", "job_category", "field_est_total"]],
+        on=["uwi", "failure_date"])
+    replay = replay_payload(feats, clf, pick_replay_cases(cases[cases["component"] != "Other"]))
 
     # importance: drop in PR-AUC when a feature is shuffled
     rng = np.random.default_rng(0)
@@ -344,6 +413,10 @@ def run() -> dict:
         "model": model_m, "rule_80pct": rule_m, "rule_matched_budget": rule_matched,
         "running_only": running_cmp,
         "shortfall_after_first_alert_m3": after_alert,
+        "alert_episodes": int(len(episodes)),
+        "alert_episodes_per_day": float(len(episodes) / t["production_date"].nunique()),
+        "alert_outcomes": outcomes,
+        "replay": replay,
         "importance": dict(sorted(importance.items(), key=lambda kv: -kv[1])[:10]),
         "daily_alerts": {"date": daily_alerts["production_date"].dt.strftime("%Y-%m-%d").tolist(),
                          "alerts": daily_alerts["alerts"].astype(int).tolist(),

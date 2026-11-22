@@ -45,6 +45,28 @@ Gradient-boosted trees (`sklearn` `HistGradientBoostingClassifier`) score every 
 
 The model has ROC-AUC 0.83 and PR-AUC 0.23, against a base rate of 3.0%. Oil lost between the model's first alert and the failure date in the test period was **8,156 m³ (51,300 bbl)**. That is an upper bound on what earlier action could address, not a savings claim. The dashboard converts it to dollars at an oil price the user enters.
 
+### Engineer workload
+
+Most of the 22 alerts a day repeat on the same well. If repeat alerts within 7 days count as one review, the test period has **1,686 reviews, about 7.2 new wells to check per day**:
+
+| Outcome | Count |
+|---|---|
+| Confirmed: a logged failure followed within 7 days | 665 (39% of reviews) |
+| No recorded failure within 7 days (not automatically wrong: the well may have been fixed) | 1,021 (61% of reviews) |
+| Missed: a logged failure with no alert in the 7 days before it | 461 (41% of failures) |
+
+### Historical replay
+
+The dashboard replays six caught test-period failures, two each for rods, pump and tubing. Each case is on a well still running at the first alert. For each case the page first shows the well as it looked on the first-alert date:
+
+- risk score
+- oil against the well's own baseline
+- run hours
+- torque, current, efficiency and RPM against baseline
+- failure history
+
+Each case also lists "why this alert might be wrong" and recommended checks. **Reveal outcome** then shows the logged failure, its cause, the repair job and its cost. These are the model's best cases. Read them next to the workload table, which counts every alert.
+
 ## Limits (say these in the pitch)
 
 - **Research prototype on historical data.** Data ends 2026-10-26. Every alert is a backtest result, not a live field warning.
