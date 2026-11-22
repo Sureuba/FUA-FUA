@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WellGuard Failure Risk</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #14181f; --muted: #5b6472; --line: #e2e6ec;
+    --accent: #c2410c; --accent-soft: #fde7d9; --good: #15803d; --bad: #b91c1c;
+    --s1: #c2410c; --s2: #2563eb; --s3: #0f766e; --s4: #9ca3af;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1216; --panel: #171b21; --ink: #e8ebef; --muted: #9aa3ae; --line: #2a3039;
+      --accent: #fb923c; --accent-soft: #3a2415; --good: #4ade80; --bad: #f87171;
+      --s1: #fb923c; --s2: #60a5fa; --s3: #2dd4bf; --s4: #6b7280;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1216; --panel: #171b21; --ink: #e8ebef; --muted: #9aa3ae; --line: #2a3039;
+    --accent: #fb923c; --accent-soft: #3a2415; --good: #4ade80; --bad: #f87171;
+    --s1: #fb923c; --s2: #60a5fa; --s3: #2dd4bf; --s4: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.02em; }
+  h2 { font-size: 17px; margin: 0 0 12px; }
+  p { margin: 0 0 8px; }
+  .muted { color: var(--muted); }
+  .banner { background: var(--accent-soft); border-left: 4px solid var(--accent); padding: 10px 14px;
+            border-radius: 6px; margin: 16px 0 24px; font-size: 14px; }
+  .grid { display: grid; gap: 16px; }
+  .kpis { grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); margin-bottom: 16px; }
+  .two { grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); margin-bottom: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; min-width: 0; }
+  .kpi .v { font-size: 28px; font-weight: 650; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .kpi .l { color: var(--muted); font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 14px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+  td.n, th.n { text-align: right; }
+  .win { color: var(--good); font-weight: 650; }
+  .scroll { overflow-x: auto; }
+  .chart { position: relative; height: 260px; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 99px; font-size: 12px; font-weight: 600;
+          background: var(--accent-soft); color: var(--accent); }
+  label { font-size: 14px; color: var(--muted); }
+  input[type=number] { width: 90px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px;
+                       background: var(--bg); color: var(--ink); font: inherit; }
+  ul { margin: 0; padding-left: 18px; } li { margin-bottom: 4px; }
+  .bar { height: 10px; background: var(--s1); border-radius: 3px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>WellGuard</h1>
+  <p class="muted">Rod, pump and tubing failure risk for Strathcona's heavy-oil PCP wells</p>
+  <div class="banner" id="banner"></div>
+
+  <section class="grid kpis" id="kpis" aria-label="Key figures"></section>
+
+  <section class="grid two">
+    <div class="card">
+      <h2>Model vs. a simple threshold rule</h2>
+      <p class="muted" id="cmpNote"></p>
+      <div class="scroll"><table id="cmp"></table></div>
+      <p class="muted" id="runNote" style="margin-top:10px"></p>
+    </div>
+    <div class="card">
+      <h2>What earlier action could address</h2>
+      <p class="muted">Oil below baseline between the model's first alert and the failure date, in the test period. This is an upper bound, not a savings claim.</p>
+      <p><label for="price">Oil price assumption (C$/bbl, edit me)</label>
+         <input id="price" type="number" value="70" min="0" step="5"></p>
+      <div class="kpi"><div class="v" id="addrBbl"></div><div class="l">bbl after first alert</div></div>
+      <div class="kpi" style="margin-top:8px"><div class="v" id="addrCad"></div><div class="l">revenue at the price above (upper bound)</div></div>
+    </div>
+  </section>
+
+  <section class="grid two">
+    <div class="card"><h2>Failures and oil shortfall by component</h2><div class="chart"><canvas id="cComp" aria-label="Failures by component"></canvas></div></div>
+    <div class="card"><h2>Failures logged per month</h2><div class="chart"><canvas id="cMonth" aria-label="Failures per month"></canvas></div></div>
+  </section>
+
+  <section class="grid two">
+    <div class="card"><h2>Daily alerts in the backtest</h2>
+      <p class="muted">Alerts per day, and how many were followed by a failure within 7 days.</p>
+      <div class="chart"><canvas id="cAlerts" aria-label="Daily alerts"></canvas></div></div>
+    <div class="card"><h2>Strongest signals</h2>
+      <p class="muted">Drop in PR-AUC when each input is shuffled. These are associations, not causes.</p>
+      <div class="scroll"><table id="imp"></table></div></div>
+  </section>
+
+  <section class="card" style="margin-bottom:16px">
+    <h2>Highest-risk running wells on <span id="lastDay"></span> <span class="pill">historical demo</span></h2>
+    <p class="muted">Wells with no run hours in the last 3 days are left out, since operators already know they are down.</p>
+    <div class="scroll"><table id="risk"></table></div>
+  </section>
+
+  <section class="card">
+    <h2>Method and limits</h2>
+    <ul id="limits"></ul>
+  </section>
+</main>
+
+<script src="data.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+const S = window.WELLGUARD;
+const $ = id => document.getElementById(id);
+const fmt = (x, d = 0) => Number(x).toLocaleString("en-CA", { maximumFractionDigits: d, minimumFractionDigits: d });
+const pct = x => fmt(100 * x, 0) + "%";
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const BBL = 6.2898;
+
+$("banner").innerHTML = `<strong>Research prototype, not a live field model.</strong> Data ends ${S.data_end}. ` +
+  `Model trained on ${S.study_start} to ${S.test_start} and tested on later, unseen months. Every alert shown is a historical backtest result.`;
+
+const kpis = [
+  [fmt(S.failures_scored), "rod, pump and tubing failures scored since " + S.study_start],
+  [fmt(S.shortfall_bbl), `bbl below normal rate in the 14 days up to each failure (${fmt(S.shortfall_m3)} m³)`],
+  ["C$" + fmt(S.repair_cost_total_cad / 1e6, 1) + "M", `field-estimated repair cost, ${fmt(S.repair_cost_matched_failures)} matched jobs (median C$${fmt(S.repair_cost_median_cad)})`],
+  [fmt(S.median_lead_days_low) + " days", "median time a well runs below 80% of baseline before failing"],
+];
+$("kpis").innerHTML = kpis.map(([v, l]) => `<div class="card kpi"><div class="v">${v}</div><div class="l">${l}</div></div>`).join("");
+
+const M = S.model, R = S.rule_matched_budget, R0 = S.rule_80pct;
+$("cmpNote").textContent = `Same alert budget: ${fmt(M.alerts_per_day)} alerts/day across ${fmt(S.wells_modelled)} wells (${pct(S.alert_rate)} of well-days). ` +
+  `Test period: ${fmt(M.failures_in_test)} failures.`;
+const rows = [
+  ["Failures caught (recall)", pct(M.event_recall), pct(R.event_recall), pct(R0.event_recall)],
+  ["Alerts that were real (precision)", pct(M.alert_precision), pct(R.alert_precision), pct(R0.alert_precision)],
+  ["Median warning", fmt(M.median_warning_days) + " d", fmt(R.median_warning_days) + " d", fmt(R0.median_warning_days) + " d"],
+  ["Alerts per day", fmt(M.alerts_per_day), fmt(R.alerts_per_day), fmt(R0.alerts_per_day)],
+];
+$("cmp").innerHTML = `<thead><tr><th></th><th class="n">Model</th><th class="n">Rule, same budget</th><th class="n">Rule, every day &lt;80%</th></tr></thead><tbody>` +
+  rows.map((r, i) => `<tr><td>${r[0]}</td><td class="n ${i < 2 ? "win" : ""}">${r[1]}</td><td class="n">${r[2]}</td><td class="n">${r[3]}</td></tr>`).join("") +
+  `</tbody>`;
+
+const RM = S.running_only.model, RR = S.running_only.rule_matched_budget;
+$("runNote").innerHTML = `<strong>Wells still running only</strong> (alerts on wells already down are easy): ` +
+  `model catches <span class="win">${pct(RM.event_recall)}</span> of ${fmt(RM.failures_in_test)} failures at ${pct(RM.alert_precision)} precision; ` +
+  `the rule at the same budget catches ${pct(RR.event_recall)} at ${pct(RR.alert_precision)}.`;
+
+function updateValue() {
+  const bbl = S.shortfall_after_first_alert_m3 * BBL;
+  $("addrBbl").textContent = fmt(bbl);
+  $("addrCad").textContent = "C$" + fmt(bbl * (Number($("price").value) || 0));
+}
+$("price").addEventListener("input", updateValue);
+updateValue();
+
+$("imp").innerHTML = (() => {
+  const e = Object.entries(S.importance), max = Math.max(...e.map(x => x[1]));
+  return "<tbody>" + e.map(([k, v]) => `<tr><td>${k}</td><td style="width:45%"><div class="bar" style="width:${(100 * v / max).toFixed(0)}%"></div></td><td class="n">${v.toFixed(3)}</td></tr>`).join("") + "</tbody>";
+})();
+
+$("lastDay").textContent = S.data_end;
+$("risk").innerHTML = `<thead><tr><th>Well</th><th>Field</th><th class="n">Risk</th><th class="n">Oil m³/d</th><th class="n">vs normal</th><th class="n">Hrs on (3d)</th><th class="n">Failures 365d</th></tr></thead><tbody>` +
+  S.risk_top.map(w => `<tr><td>${w.well_name}<br><span class="muted" style="font-size:12px">${w.uwi}</span></td><td>${w.field_operating_area}</td>` +
+    `<td class="n">${w.alert ? '<span class="pill">alert</span> ' : ""}${w.risk_score.toFixed(2)}</td><td class="n">${fmt(w.oil_produced_m3, 1)}</td>` +
+    `<td class="n">${w.oil_ratio_3d == null ? "–" : pct(w.oil_ratio_3d)}</td><td class="n">${w.hours_on_3d == null ? "–" : fmt(w.hours_on_3d, 1)}</td><td class="n">${fmt(w.failures_prior_365d)}</td></tr>`).join("") + "</tbody>";
+
+$("limits").innerHTML = [
+  `Label: a logged rod, pump or tubing failure in the next 7 days. Unlogged wells are not assumed healthy, so only the ${fmt(S.wells_modelled)} producing wells in failure-reporting fields are modelled.`,
+  `Time split: trained on ${fmt(S.well_days_train)} well-days before ${S.test_start}, tested on ${fmt(S.well_days_test)} later well-days, with a 7-day gap so labels cannot leak.`,
+  `Baseline = each well's median oil rate 8 to 38 days earlier. ${pct(S.healthy_low_share)} of healthy well-days (no failure within 45 days) still sit below 80% of baseline, which is why a plain threshold floods engineers with alerts.`,
+  `Warning time is short: median ${fmt(M.median_warning_days)} days. Much of the signal is a well already slowing or going down before the failure is logged. Treat it as early detection plus prioritisation, not a week-ahead forecast.`,
+  `Shortfall counts oil below baseline in the 14 days up to the failure. The logged lost_oil_m3 for the same windows is ${fmt(S.lost_oil_logged_m3)} m³. Repair cost is the field estimate of the first job within -3 to +21 days of the failure.`,
+  `Read-only: no setpoint or control data exists, so WellGuard ranks wells for engineers to check and changes nothing in the field. Signals are associations, not root causes.`,
+].map(t => `<li>${t}</li>`).join("");
+
+if (window.Chart) {
+  Chart.defaults.color = css("--muted");
+  Chart.defaults.borderColor = css("--line");
+  Chart.defaults.font.family = "system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+  const comp = S.by_component.filter(c => c.component !== "Other");
+  new Chart($("cComp"), {
+    type: "bar",
+    data: { labels: comp.map(c => c.component), datasets: [
+      { label: "Failures", data: comp.map(c => c.failures), backgroundColor: css("--s1"), yAxisID: "y" },
+      { label: "Shortfall (bbl)", data: comp.map(c => Math.round(c.shortfall_m3 * BBL)), backgroundColor: css("--s2"), yAxisID: "y2" }] },
+    options: { maintainAspectRatio: false, scales: { y: { beginAtZero: true, title: { display: true, text: "failures" } },
+      y2: { beginAtZero: true, position: "right", grid: { display: false }, title: { display: true, text: "bbl" } } } },
+  });
+  const months = Object.keys(S.monthly_failures);
+  new Chart($("cMonth"), {
+    type: "line",
+    data: { labels: months, datasets: [{ label: "Failures", data: months.map(m => S.monthly_failures[m]),
+      borderColor: css("--s1"), backgroundColor: css("--s1"), tension: 0.25, pointRadius: 2 }] },
+    options: { maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true } } },
+  });
+  const A = S.daily_alerts;
+  new Chart($("cAlerts"), {
+    type: "bar",
+    data: { labels: A.date, datasets: [
+      { label: "Followed by failure", data: A.true_alerts, backgroundColor: css("--s1"), stack: "a" },
+      { label: "No failure within 7 d", data: A.alerts.map((a, i) => a - A.true_alerts[i]), backgroundColor: css("--s4"), stack: "a" }] },
+    options: { maintainAspectRatio: false, scales: { x: { stacked: true, ticks: { maxTicksLimit: 8 } }, y: { stacked: true, beginAtZero: true } } },
+  });
+}
+</script>
+</body>
+</html>

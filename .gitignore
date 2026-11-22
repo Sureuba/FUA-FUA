@@ -52,3 +52,9 @@ Thumbs.db
 !.vscode/settings.json
 *.swp
 
+
+# Competition data and docs (not ours to publish)
+data/
+*.parquet
+*.pdf
+outputs/canary_risk_tags.csv
